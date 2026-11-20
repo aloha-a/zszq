@@ -1,0 +1,8 @@
+.git
+**/target
+**/__pycache__
+.idea
+.vscode
+.env
+docs
+*.pdf

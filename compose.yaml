@@ -1,0 +1,110 @@
+name: zszq
+
+x-app-env: &app-env
+  SERVER_PORT: 8080
+  MYSQL_HOST: mysql
+  MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zszq_local}
+
+x-amqp-env: &amqp-env
+  <<: *app-env
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-zszq_local}
+
+x-app: &app
+  depends_on:
+    mysql:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/actuator/health/readiness"]
+    interval: 10s
+    timeout: 5s
+    start_period: 45s
+    retries: 6
+
+services:
+  mysql:
+    image: mysql:8.4
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_bin", "--default-time-zone=+00:00"]
+    environment:
+      MYSQL_DATABASE: zszq
+      MYSQL_USER: zszq
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zszq_local}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_local}
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/mock-ta.sql:/docker-entrypoint-initdb.d/02-mock-ta.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=tcp -h 127.0.0.1 -u zszq -D zszq -e 'SELECT 1 FROM activity LIMIT 1'"]
+      interval: 5s
+      timeout: 5s
+      start_period: 35s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: zszq
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-zszq_local}
+    ports:
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_UI_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 8s
+      start_period: 20s
+      retries: 12
+
+  activity-service:
+    <<: *app
+    build: {context: ., target: activity-service}
+    environment: *app-env
+
+  purchase-service:
+    <<: *app
+    build: {context: ., target: purchase-service}
+    environment: *amqp-env
+    deploy:
+      replicas: 2
+
+  order-service:
+    <<: *app
+    build: {context: ., target: order-service}
+    environment: *amqp-env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  mock-ta-service:
+    <<: *app
+    build: {context: ., target: mock-ta-service}
+    environment: *app-env
+
+  gateway:
+    image: nginx:1.28-alpine
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+    volumes:
+      - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      activity-service:
+        condition: service_healthy
+      purchase-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health/purchase"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  mysql-data:
+  rabbitmq-data:
